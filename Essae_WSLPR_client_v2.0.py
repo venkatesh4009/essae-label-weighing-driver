@@ -7,6 +7,8 @@ import threading
 import time
 import sqlite3
 import json
+import re
+from collections import OrderedDict
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton,
@@ -14,20 +16,26 @@ from PyQt5.QtWidgets import (
     QAction, QStatusBar, QLineEdit, QHBoxLayout,
     QTabWidget, QGridLayout, QSplitter, QMessageBox,
     QComboBox, QInputDialog, QDialog, QDialogButtonBox,
-    QListWidget, QListWidgetItem
+    QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView, QStyledItemDelegate
 )
-from PyQt5.QtGui import QFont, QColor
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QFont, QColor, QBrush, QPalette, QValidator, QRegExpValidator, QIntValidator
+from PyQt5.QtCore import Qt, pyqtSignal, QObject, QRegExp
+
+# === Get real path for installed files ===
+BASE_DIR = os.path.dirname(os.path.realpath(__file__))  # /usr/local/bin/
+SERVER_PATH = os.path.join(BASE_DIR, "Essae_WSLPR_server_v2.0")
+DB_PATH = os.path.join(BASE_DIR, "SQL_LFT_Files.db")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 # --- Version reader ---
 def get_driver_version():
     import subprocess
     try:
-        output = subprocess.check_output(['./Essae_WSLPR_server_v2.0', '--version'])
+        output = subprocess.check_output([SERVER_PATH, '--version'])
         return output.decode().strip()
     except Exception as e:
         return f"Error: {e}"
-
 
 # Constants
 PORT = 8888
@@ -35,8 +43,30 @@ DEFAULT_HOST = '0.0.0.0'
 POLL_INTERVAL = 1.0       # seconds between raw polls normally
 CAL_POLL_INTERVAL = 0.2   # seconds between calibration raw polls
 RECV_TIMEOUT = 2.0        # socket recv timeout
-DB_PATH = 'SQL_LFT_Files.db'
 MAX_SLOTS = 99
+
+# Debug check if files exist
+if not os.path.exists(SERVER_PATH):
+    print(f"[ERROR] Missing: {SERVER_PATH}")
+if not os.path.exists(DB_PATH):
+    print(f"[ERROR] Missing: {DB_PATH}")
+
+class HexValidator(QValidator):
+    def validate(self, input_text, pos):
+        if not input_text:
+            return QValidator.Acceptable, input_text, pos
+            
+        # Check if input is valid hex
+        if re.match(r'^[0-9a-fA-F]{0,2}$', input_text):
+            return QValidator.Acceptable, input_text.upper(), pos
+        return QValidator.Invalid, input_text, pos
+
+class HexItemDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if index.column() == 1:  # Only validate the value column
+            editor.setValidator(HexValidator())
+        return editor
 
 class LFTEditorDialog(QDialog):
     def __init__(self, name, content, save_callback, parent=None):
@@ -57,6 +87,104 @@ class LFTEditorDialog(QDialog):
         new_content = self.text.toPlainText().encode('utf-8')
         self.save_callback(new_content)
         self.accept()
+
+class SpecEditorDialog(QDialog):
+    def __init__(self, title, content, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(500, 200)
+        layout = QVBoxLayout(self)
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(content)
+        layout.addWidget(QLabel(f"Edit {title}:"))
+        layout.addWidget(self.text_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_content(self):
+        # Only remove non-hex characters - PRESERVE SPACES
+        content = self.text_edit.toPlainText().strip()
+        content = re.sub(r'[^0-9a-fA-F ]', '', content)
+        return content
+
+class TableSpecEditorDialog(QDialog):
+    def __init__(self, spec_type, content, parent=None):
+        super().__init__(parent)
+        self.spec_type = spec_type
+        title = "Technical Specification" if spec_type == 'tech' else "Customer Specification"
+        self.setWindowTitle(f"Edit {title}")
+        self.resize(500, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Create table
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        
+        # Set alternating row colors
+        self.table.setAlternatingRowColors(True)
+        
+        # Set item delegate for validation
+        delegate = HexItemDelegate()
+        self.table.setItemDelegateForColumn(1, delegate)
+        
+        # Define parameter labels based on spec type
+        if spec_type == 'tech':
+            self.param_labels = [f"T{i}" for i in range(10, 26)]  # T10 to T25
+            self.row_count = 16
+        else:  # customer
+            self.param_labels = [f"C{i}" for i in range(10, 34)]  # C10 to C33
+            self.row_count = 24
+            
+        self.table.setRowCount(self.row_count)
+        
+        # Populate table with data
+        values = content.split() if content else [""] * self.row_count
+        for i, label in enumerate(self.param_labels):
+            # Parameter label
+            param_item = QTableWidgetItem(label)
+            param_item.setFlags(param_item.flags() & ~Qt.ItemIsEditable)
+            param_item.setBackground(QColor(240, 240, 240))
+            self.table.setItem(i, 0, param_item)
+            
+            # Value field
+            value = values[i] if i < len(values) else ""
+            value_item = QTableWidgetItem(value)
+            value_item.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(i, 1, value_item)
+        
+        layout.addWidget(self.table)
+        
+        # Add save/cancel buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def get_content(self):
+        """Get the spec content as a space-separated string"""
+        values = []
+        for i in range(self.row_count):
+            item = self.table.item(i, 1)
+            if item and item.text().strip():
+                # Clean value: remove non-hex characters
+                clean_value = re.sub(r'[^0-9a-fA-F]', '', item.text().strip())
+                if clean_value:
+                    # Pad with zero if needed
+                    if len(clean_value) == 1:
+                        clean_value = "0" + clean_value
+                    values.append(clean_value)
+                else:
+                    values.append("00")  # Default if empty
+            else:
+                values.append("00")  # Default if empty
+        return " ".join(values)
 
 class BarcodeEditorDialog(QDialog):
     def __init__(self, data=None, save_callback=None, parent=None):
@@ -99,24 +227,28 @@ class LabelAndScaleGUI(QMainWindow):
         self.resize(950, 550)
         self.setMinimumSize(800, 450)
         self.version_label = QLabel("Driver Version: unknown")
+        
+        # State for spec writing
+        self.pending_spec_write = None  # 'tech' or 'customer'
 
         # Networking state
         self.server_host = DEFAULT_HOST
         self.connected   = False
         self.polling     = False
+        self.lock        = threading.Lock()  # For thread-safe communication
 
         # Initialize database
         self._init_db()
-
-        # Connect signals
-        self.scale_response.connect(self._on_scale_response)
-        self.raw_data.connect(self._on_raw_data)
 
         # Build UI
         self._create_menu()
         self._create_main_layout()
         self._create_statusbar()
         self._apply_styles()
+        
+        # Connect signals AFTER UI creation
+        self.scale_response.connect(self._on_scale_response)
+        self.raw_data.connect(self._on_raw_data)
         
     def _init_db(self):
         self.conn = sqlite3.connect(DB_PATH)
@@ -157,58 +289,6 @@ class LabelAndScaleGUI(QMainWindow):
         about = QAction("&About", self)
         about.triggered.connect(lambda: self.statusBar().showMessage("Label+Scale GUI v2.0"))
         hm.addAction(about)
-
-    def _on_scale_response(self, cmd, response):
-       print(f"Scale response: {cmd} → {response}")
-
-    def _on_raw_data(self, data):
-       print(f"Raw scale data: {data}")
-    
-    def print_label(self):
-        if not self.connected:
-            self.log.append("⚠️ Error: Not connected.")
-            return
-
-        if not hasattr(self, 'json_path'):
-            self.log.append("⚠️ Error: Select JSON file first.")
-            return
-
-        slot = self.slot_select.currentData()
-        if not slot:
-            self.log.append("⚠️ Error: Select an LFT slot first.")
-            return
-
-        try:
-            # Check if LFT slot exists
-            c = self.conn.cursor()
-            c.execute('SELECT content FROM lft_files WHERE slot=?', (slot,))
-            row = c.fetchone()
-            if not row:
-                self.log.append("⚠️ Error: Selected LFT slot is empty.")
-                return
-
-            # Barcode number from dropdown
-            barcode_number = self.barcode_select.currentData()
-            if barcode_number is None:
-                self.log.append("⚠️ Error: Select a barcode number.")
-                return
-
-            # ✅ Now send JSON path, slot, and barcode number to server
-            packet = (
-                f"MODE:PRINTER\n"
-                f"{self.json_path}\n"
-                f"{slot}\n"
-                f"{barcode_number}\n"
-            ).encode()
-
-            # Send to TCP server
-            with socket.create_connection((self.server_host, PORT), timeout=5) as s:
-                s.sendall(packet)
-                resp = s.recv(1024).decode().strip()
-                self.log.append(f"🖨️ Printer → {resp}")
-        except Exception as e:
-            self.log.append(f"❌ Print error: {e}")
-
 
     def _create_main_layout(self):
         container = QWidget(self)
@@ -576,20 +656,83 @@ class LabelAndScaleGUI(QMainWindow):
         buttons = [
             ("Write Tech Spec",   "WR_TECHSPEC"),
             ("Read Tech Spec",    "RD_TECHSPEC"),
-            ("Write Custom Spec", "WR_CUSSPEC"),
-            ("Read Custom Spec",  "RD_CUSSPEC"),
+            ("Write Customer Spec", "WR_CUSSPEC"),
+            ("Read Customer Spec",  "RD_CUSSPEC"),
+            ("Load Defaults",     "XC_LOAD_DEFAULTS")
         ]
         self.tech_btns = []
         for i, (lbl, cmd) in enumerate(buttons):
             b = QPushButton(lbl)
-            b.clicked.connect(lambda _, c=cmd: self._threaded_scale_cmd(c))
+            if "Load Defaults" in lbl:
+                b.clicked.connect(lambda _, c=cmd: self._threaded_scale_cmd(c))
+            elif "Write" in lbl:
+                if "Tech" in lbl:
+                    b.clicked.connect(self._write_tech_spec)
+                else:
+                    b.clicked.connect(self._write_custom_spec)
+            else:
+                b.clicked.connect(lambda _, c=cmd: self._threaded_scale_cmd(c))
             self.tech_btns.append(b)
-            g.addWidget(b, i//2, i%2)
+            row = i // 2  # Calculate row index
+            col = i % 2   # Calculate column index
+            g.addWidget(b, row, col)
         self.tech_log = QTextEdit()
         self.tech_log.setReadOnly(True)
-        g.addWidget(self.tech_log, 2, 0, 1, 2)
+        g.addWidget(self.tech_log, 3, 0, 1, 2)
         self.tabs.addTab(w, "Tech Specs")
 
+    # Tech spec handling methods - FIXED LOGIC
+    def _write_tech_spec(self):
+        # Set pending operation
+        self.pending_spec_write = 'tech'
+        # Read current tech spec first
+        self._threaded_scale_cmd("RD_TECHSPEC")
+
+    def _write_custom_spec(self):
+        # Set pending operation
+        self.pending_spec_write = 'customer'
+        # Read current custom spec first
+        self._threaded_scale_cmd("RD_CUSSPEC")
+
+    def _show_spec_editor(self, spec_type, content):
+        """Show the table-based spec editor dialog"""
+        dlg = TableSpecEditorDialog(spec_type, content, self)
+        if dlg.exec_() == QDialog.Accepted:
+            spec = dlg.get_content()
+            # Send the correct command based on spec type
+            if spec_type == 'tech':
+                cmd = "WR_TECHSPEC"
+            else:
+                cmd = "WR_CUSSPEC"
+            self._threaded_scale_cmd(cmd, payload=spec)
+        else:
+            # If user canceled, reset pending operation
+            self.pending_spec_write = None
+            # Re-enable buttons
+            self._set_scale_buttons_enabled(True)
+
+    def _format_spec_table(self, spec_type, spec_str):
+        """Format spec string as a table string"""
+        if spec_type == 'tech':
+            labels = [f"T{i}" for i in range(10, 26)]  # T10 to T25
+            row_count = 16
+        else:  # customer
+            labels = [f"C{i}" for i in range(10, 34)]  # C10 to C33
+            row_count = 24
+            
+        # Split the spec string by spaces
+        values = spec_str.split()
+        # If we have fewer values than rows, pad with '??'
+        if len(values) < row_count:
+            values.extend(['??'] * (row_count - len(values)))
+        elif len(values) > row_count:
+            values = values[:row_count]
+            
+        # Format as a table string
+        table_rep = f"{spec_type.upper()} Spec:\n"
+        for i in range(row_count):
+            table_rep += f"{labels[i]}\t{values[i]}\n"
+        return table_rep
 
     def _start_calibration(self):
         self._threaded_scale_cmd("XC_SON", start_poll=True)
@@ -652,10 +795,11 @@ class LabelAndScaleGUI(QMainWindow):
         def poll():
             while self.polling:
                 try:
-                    with socket.create_connection((self.server_host, PORT), timeout=3) as s:
-                        s.sendall(b"MODE:WEIGHT\nXC_RDRAWCT\n")
-                        d = s.recv(1024).decode().strip()
-                        self.raw_data.emit(d or "<no response>")
+                    with self.lock:
+                        with socket.create_connection((self.server_host, PORT), timeout=3) as s:
+                            s.sendall(b"MODE:WEIGHT\nXC_RDRAWCT\n")
+                            d = s.recv(1024).decode().strip()
+                            self.raw_data.emit(d or "<no response>")
                 except:
                     pass
                 time.sleep(interval)
@@ -692,35 +836,106 @@ class LabelAndScaleGUI(QMainWindow):
             self.json_label.setText(os.path.basename(path))
             self.log.append("📄 JSON selected")
 
-    def _threaded_scale_cmd(self, cmd, start_poll=False, stop_poll=False):
+    def print_label(self):
+        if not self.connected:
+            self.log.append("⚠️ Error: Not connected.")
+            return
+
+        if not hasattr(self, 'json_path'):
+            self.log.append("⚠️ Error: Select JSON file first.")
+            return
+
+        slot = self.slot_select.currentData()
+        if not slot:
+            self.log.append("⚠️ Error: Select an LFT slot first.")
+            return
+
+        try:
+            # Check if LFT slot exists
+            c = self.conn.cursor()
+            c.execute('SELECT content FROM lft_files WHERE slot=?', (slot,))
+            row = c.fetchone()
+            if not row:
+                self.log.append("⚠️ Error: Selected LFT slot is empty.")
+                return
+
+            # Barcode number from dropdown
+            barcode_number = self.barcode_select.currentData()
+            if barcode_number is None:
+                self.log.append("⚠️ Error: Select a barcode number.")
+                return
+
+            # ✅ Now send JSON path, slot, and barcode number to server
+            packet = (
+                f"MODE:PRINTER\n"
+                f"{self.json_path}\n"
+                f"{slot}\n"
+                f"{barcode_number}\n"
+            ).encode()
+
+            # Send to TCP server
+            with self.lock:
+                with socket.create_connection((self.server_host, PORT), timeout=5) as s:
+                    s.sendall(packet)
+                    resp = s.recv(1024).decode().strip()
+                    self.log.append(f"🖨️ Printer → {resp}")
+        except Exception as e:
+            self.log.append(f"❌ Print error: {e}")
+
+    def _threaded_scale_cmd(self, cmd, start_poll=False, stop_poll=False, payload=None):
         self._set_scale_buttons_enabled(False)
         def task():
-            if not self.connected:
-                self.scale_response.emit(cmd, "Error: Not connected.")
-            else:
-                try:
-                    s = socket.create_connection((self.server_host, PORT), timeout=3)
-                    s.settimeout(RECV_TIMEOUT)
-                    s.sendall(b"MODE:WEIGHT\n")
-                    try:
-                        _ack = s.recv(1024)
-                    except socket.timeout:
-                        pass
-                    s.sendall(cmd.encode() + b"\n")
-                    try:
-                        resp = s.recv(1024).decode().strip()
-                    except socket.timeout:
-                        resp = "error: timed out"
-                    s.close()
-                    self.scale_response.emit(cmd, resp or "<no response>")
-                except Exception as e:
-                    self.scale_response.emit(cmd, f"error: {e}")
+            response = ""
+            try:
+                if not self.connected:
+                    response = "Error: Not connected."
+                else:
+                    with self.lock:
+                        with socket.create_connection((self.server_host, PORT), timeout=3) as s:
+                            s.settimeout(RECV_TIMEOUT)
+                            
+                            # Send MODE header
+                            s.sendall(b"MODE:WEIGHT\n")
+                            try:
+                                # Read ACK (important for sync)
+                                ack = s.recv(1024)
+                                if b"OK:WEIGHT" not in ack:
+                                    response = f"Error: Invalid ACK - {ack!r}"
+                                    self.scale_response.emit(cmd, response)
+                                    return
+                            except socket.timeout:
+                                response = "Error: ACK timeout"
+                                self.scale_response.emit(cmd, response)
+                                return
+                            
+                            # Send command
+                            s.sendall(cmd.encode() + b"\n")
+                            
+                            # Send payload if provided
+                            if payload:
+                                # Add explicit terminator for spec commands
+                                terminator = b"\n"
+                                s.sendall(payload.encode() + terminator)
+                            
+                            # Get response
+                            try:
+                                resp = s.recv(1024).decode().strip()
+                            except socket.timeout:
+                                resp = "error: timed out"
+                            response = resp or "<no response>"
+            except Exception as e:
+                response = f"error: {e}"
+            
+            # Emit response signal
+            self.scale_response.emit(cmd, response)
+            
             if start_poll:
                 self.polling = True
                 self.cal1.setEnabled(False)
             if stop_poll:
                 self.polling = False
                 self.cal1.setEnabled(True)
+        
         threading.Thread(target=task, daemon=True).start()
 
     def _set_scale_buttons_enabled(self, ok):
@@ -732,6 +947,40 @@ class LabelAndScaleGUI(QMainWindow):
             b.setEnabled(ok)
 
     def _on_scale_response(self, cmd, resp):
+        # Handle pending spec write operations
+        if self.pending_spec_write and cmd in ["RD_TECHSPEC", "RD_CUSSPEC"]:
+            # Clean response (remove NAK prefix if present)
+            clean_resp = resp.lstrip('\x15').strip()
+            spec_type = self.pending_spec_write
+            self.pending_spec_write = None  # Reset immediately after use
+            
+            if clean_resp.startswith("Error"):
+                self.tech_log.append(f"{cmd} → {clean_resp}")
+                self._set_scale_buttons_enabled(True)
+            else:
+                # Show editor with current spec
+                self._show_spec_editor(spec_type, clean_resp)
+            return
+        
+        # Handle write command responses
+        if cmd in ["WR_TECHSPEC", "WR_CUSSPEC"]:
+            self.tech_log.append(f"{cmd} → Spec sent to scale")
+            self._set_scale_buttons_enabled(True)
+            return
+        
+        # Handle read spec responses (normal read operations)
+        if cmd in ["RD_TECHSPEC", "RD_CUSSPEC"]:
+            clean_resp = resp.lstrip('\x15').strip()
+            if clean_resp.startswith("Error"):
+                self.tech_log.append(f"{cmd} → {clean_resp}")
+            else:
+                spec_type = 'tech' if cmd == "RD_TECHSPEC" else 'customer'
+                formatted = self._format_spec_table(spec_type, clean_resp)
+                self.tech_log.append(formatted)
+            self._set_scale_buttons_enabled(True)
+            return
+        
+        # Existing response handling...
         if cmd == "RD_WEIGHT":
             try:
                 g = int(resp)
@@ -739,8 +988,10 @@ class LabelAndScaleGUI(QMainWindow):
             except:
                 disp = resp
             self.weight_display.setText(disp)
+        
         log_entry = f"{cmd} → {resp}"
         self._set_scale_buttons_enabled(True)
+        
         current_tab = self.tabs.tabText(self.tabs.currentIndex())
         if current_tab == "Normal" or cmd == "RD_WEIGHT":
             self.normal_log.append(log_entry)
@@ -785,6 +1036,31 @@ class LabelAndScaleGUI(QMainWindow):
                 border-radius: 3px;
             }
             QListWidget::item:selected {
+                background-color: #00CED1;
+                color: #002B36;
+                font-weight: bold;
+            }
+            QTableWidget {
+                background-color: white;
+                alternate-background-color: #f0f8ff;
+                gridline-color: #c0c0c0;
+                font-family: monospace;
+            }
+            QHeaderView::section {
+                background-color: #008B8B;
+                color: white;
+                padding: 4px;
+                border: 1px solid #6c6c6c;
+                font-weight: bold;
+            }
+            QTableWidget QTableCornerButton::section {
+                background-color: #008B8B;
+                border: 1px solid #6c6c6c;
+            }
+            QTableWidget::item {
+                padding: 4px;
+            }
+            QTableWidget::item:selected {
                 background-color: #00CED1;
                 color: #002B36;
                 font-weight: bold;
