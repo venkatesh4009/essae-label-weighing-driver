@@ -20,8 +20,8 @@ This repository contains the complete **user-space driver**, **GUI**, and **Debi
 
 | Platform         | Architecture | Status      |
 |------------------|--------------|-------------|
-| Ubuntu 20.04+    | amd64        | ✅ Tested   |
-| Ubuntu 20.04+    | arm64        | ✅ Tested   |
+| Ubuntu 22.04+    | amd64        | ✅ Tested   |
+| Ubuntu 22.04+    | arm64        | ✅ Tested   |
 
 ---
 
