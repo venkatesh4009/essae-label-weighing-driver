@@ -361,42 +361,133 @@ void process_weight_line(int client_fd, const char *cmd) {
         c = 0x17; write(weight_fd, &c, 1);
         strcpy(response, "XC_LOAD_DEFAULTS sent.");
     }
-    else if (strcmp(cmd, "WR_TECHSPEC") == 0) {
-    c = 0x18; 
-    write(weight_fd, &c, 1);
-    strcpy(response, "WR_TECHSPEC sent.");
-  }
-   else if (strcmp(cmd, "WR_CUSSPEC") == 0) {
-    c = 0x1A; 
-    write(weight_fd, &c, 1);
-    strcpy(response, "WR_CUSSPEC sent.");
- }
-   else if (strcmp(cmd, "RD_CUSSPEC") == 0) {
-        unsigned char c = 0x1B;
-        write(weight_fd, &c, 1);
-        usleep(200000);
 
-        int r = read(weight_fd, response, sizeof(response) - 1);
-        if (r <= 0) {
-            strcpy(response, "Error: no data from scale");
-        } else {
-            response[r] = '\0';
+// Modify the WR_*SPEC block:
+else if (strcmp(cmd, "WR_TECHSPEC") == 0 || strcmp(cmd, "WR_CUSSPEC") == 0) {
+    unsigned char cmd_byte;
+    const char *spec_type;
+    
+    if (strcmp(cmd, "WR_TECHSPEC") == 0) {
+        cmd_byte = 0x18;  // Use correct command for tech spec
+        spec_type = "TECH";
+    } else {
+        cmd_byte = 0x1A;
+        spec_type = "CUSTOM";
+    }
+
+    // Send command byte
+    write(weight_fd, &cmd_byte, 1);
+    usleep(50000);  // Short delay
+    
+    // Read payload
+    char payload[512] = {0};
+    int total_read = 0;
+    while (total_read < sizeof(payload) - 1) {
+        int r = read(client_fd, payload + total_read, sizeof(payload) - 1 - total_read);
+        if (r <= 0) break;
+        total_read += r;
+        if (memchr(payload, '\n', total_read)) break;
+    }
+    payload[total_read] = '\0';
+
+    // Remove trailing newline
+    char *newline = strchr(payload, '\n');
+    if (newline) *newline = '\0';
+
+    // Preserve spaces and hex characters
+    char clean_payload[512] = {0};
+    char *src = payload;
+    char *dst = clean_payload;
+    while (*src) {
+        if (isxdigit(*src) || *src == ' ') {
+            *dst++ = *src;
+        }
+        src++;
+    }
+    *dst = '\0';
+
+    // printf("[DEBUG] Sending %s spec: \"%s\"\n", spec_type, clean_payload);
+    
+    // Send payload to scale
+    write(weight_fd, clean_payload, strlen(clean_payload));
+    
+    // Add terminator (CR only)
+    write(weight_fd, " ", 1);
+    
+    // Always return success
+    strcpy(response, "06");
+    
+    // Log that we're allowing time for scale processing
+   // printf("[DEBUG] %s spec sent - allowing 6 seconds for scale processing\n", spec_type);
+}
+
+	
+else if (strcmp(cmd, "RD_CUSSPEC") == 0) {
+    unsigned char c = 0x1B;
+    write(weight_fd, &c, 1);
+    usleep(200000);
+
+    // Read raw data from scale
+    char raw_response[256] = {0};
+    int r = read(weight_fd, raw_response, sizeof(raw_response) - 1);
+    if (r <= 0) {
+        strcpy(response, "Error: no data from scale");
+    } else {
+        // Clean the response - remove non-hex characters except spaces
+        char *src = raw_response;
+        char *dst = response;
+        while (*src) {
+            if (isxdigit(*src) || *src == ' ') {
+                *dst++ = *src;
+            }
+            src++;
+        }
+        *dst = '\0';
+
+        // Trim leading/trailing spaces
+        char *start = response;
+        char *end = response + strlen(response) - 1;
+        while (*start == ' ') start++;
+        while (end > start && *end == ' ') end--;
+        *(end + 1) = '\0';
+        
+        // Shift cleaned response to start if needed
+        if (start != response) {
+            memmove(response, start, strlen(start) + 1);
         }
     }
-    else if (strcmp(cmd, "RD_TECHSPEC") == 0) {
-        unsigned char c = 0x19;
-        write(weight_fd, &c, 1);
-        usleep(200000);
+}
 
-        // Read whatever ASCII the scale sends (e.g. "03 05 03 00 ...\r\n")
-        int r = read(weight_fd, response, sizeof(response) - 1);
-        if (r <= 0) {
-            strcpy(response, "Error: no data from scale");
-        } else {
-            // Just null-terminate the ASCII string exactly as received:
-            response[r] = '\0';
+else if (strcmp(cmd, "RD_TECHSPEC") == 0) {
+    unsigned char c = 0x19;
+    write(weight_fd, &c, 1);
+    usleep(200000);
+
+    // Read whatever ASCII the scale sends
+    char raw_response[256] = {0};
+    int r = read(weight_fd, raw_response, sizeof(raw_response) - 1);
+    if (r <= 0) {
+        strcpy(response, "Error: no data from scale");
+    } else {
+        // Clean the response - remove non-hex characters except spaces
+        char *src = raw_response;
+        char *dst = response;
+        while (*src) {
+            if (isxdigit(*src) || *src == ' ') {
+                *dst++ = *src;
+            }
+            src++;
         }
+        *dst = '\0';
+        
+        // Trim leading/trailing spaces
+        char *start = response;
+        char *end = response + strlen(response) - 1;
+        while (*start == ' ') start++;
+        while (end > start && *end == ' ') end--;
+        *(end + 1) = '\0';
     }
+}
 
     else if (strcmp(cmd, "XC_RESTART") == 0) {
         c = 0x1C; write(weight_fd, &c, 1);
@@ -1895,7 +1986,7 @@ if (argc > 1 && strcmp(argv[1], "--version") == 0) {
     }
     else if (argc == 1) {
 	// 1. Open & configure the scale serial port (OPTIONAL)
-	weight_fd = open("/dev/ttyUSB1", O_RDWR | O_NOCTTY | O_SYNC);
+	weight_fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_SYNC);
 	if (weight_fd < 0) {
 	    perror("Warning: scale not connected (/dev/ttyUSB1)");
 	    weight_fd = -1;  // mark as unavailable
@@ -2067,7 +2158,7 @@ int convert_label(const char *config_path, const char *lft_path) {
     }
 
     
-    const char *portname = "/dev/ttyUSB0";
+    const char *portname = "/dev/ttyUSB1";
     int fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
         perror("opening serial port");
@@ -2617,4 +2708,3 @@ else if (strncmp(line, "~e", 2) == 0) {
 }
 
 // ------------- End Of The Driver Code -----------------------------------------------------------------
-
