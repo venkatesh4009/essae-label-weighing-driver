@@ -19,7 +19,8 @@
 #include <errno.h>
 #include <stddef.h>
 
-// Networking headers
+// ------ Networking headers ---------------------------------------------------------
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -32,14 +33,15 @@
 #define INITIAL_CAP 16384
 
 #define LFT_DB_PATH "SQL_LFT_Files.db"
-
+#define DRIVER_VERSION "v2.0.0"
 
 #define ESC 0x1B
 #define GS  0x1D
 #define FS  0x1C
 #define LF  0x0A
 
-// Printer-specific Units
+// ----- Printer-specific Units ------------------------------------------------------
+
 #define DOTS_PER_MM     8.0f           // 1 mm = 8 dots
 #define DOTSIZE         0.125f         // 1 dot = 0.125 mm
 #define MAX_DOTS        432            // 432 dot head
@@ -47,23 +49,24 @@
 #define DEFAULT_LINE_SPACING_MM 3.0f
 #define MAX_BITMAP_SIZE 4096
 
-char raw[4096];           // Temporary buffer for reading image or skipping line
-
 #define MAX_ING_LINES 10
 #define MAX_ING_LINE_LEN 128
 
-int lbl_wtgrams = 1;
-int uom_type = 0;
 #define WEIGH 1
 #define PCS   0
+
+int lbl_wtgrams = 1;
+int uom_type = 0;
 
 double unit_price = 0.0;          // 5 – Unit Price
 double actual_unit_price = 0.0;   // 73 – Actual Unit Price
 char uom[32] = "";
 char guom[32] = "";
 char spl_up[32] = "";
+char raw[4096];           // Temporary buffer for reading image or skipping line
 
-// ─── Globals ──────────────────────────────────────────────────────
+// ------- Globals ---------------------------------------------------------------------
+
 static float lbl_width_mm;    // full label width in mm (from ~S)
 static float lbl_height_mm;   // full label height in mm (from ~S)
 static float lbl_x_offset = 0.0f;      // tune this so x=0 lines up
@@ -76,11 +79,13 @@ extern double actual_unit_price;
 extern double unit_price;
 extern int uom_type;
 
-// ─── Helpers ──────────────────────────────────────────────────────
+// ----- Helpers -------------------------------------------------------------------------
+
 static inline uint8_t lo(int v) { return v & 0xFF; }
 static inline uint8_t hi(int v) { return (v >> 8) & 0xFF; }
 
-// Store label dimensions (from ~S) so send_text() can use them:
+// ---- Store label dimensions (from ~S) so send_text() can use them: --------------------
+
 static float label_width_mm;
 static float label_height_mm;
 
@@ -89,7 +94,8 @@ static struct json_object *json_root = NULL;
 int weight_fd;
 pthread_mutex_t weight_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Forward declarations
+// ------- Forward_declarations ----------------------------------------------------------
+
 int setup_server_socket(int port);
 void handle_client(int client_fd);
 ssize_t write_all(int fd, const void *buf, size_t len);
@@ -103,23 +109,34 @@ void select_font(int fd, int font);
 void set_text_size(int fd, float h, float w);
 void set_absolute_position(int prn, int x_dots, int y_dots);
 
+int LoadDBBarcodeRecord(int bcnum,
+    char *out_data, char *out_type, char *out_name,
+    char *out_fld1, char *out_cond1, char *out_shift1,
+    char *out_fld2, char *out_cond2, char *out_shift2);
+    
+int GetBarcodeData(char *out_pattern, const char *barcode_type);
+
 unsigned char CheckPrintStatus(char prnstatus);
 
+// ------ Check_Print_Status --------------------------------------------------------------
 
 unsigned char CheckPrintStatus(char prnstatus) {
-    if (prnstatus == '0') return 0;  // Never print
-    if (prnstatus == '1') return 1;  // Always print
+    if (prnstatus == '0') return 0;  // Never print (No)
+    if (prnstatus == '1') return 1;  // Always print (All)
 
-    if (prnstatus == '2') return (uom_type == WEIGH); // Only for weighing items
-    if (prnstatus == '3') return (uom_type == PCS);   // Only for PCS
+    if (prnstatus == '2') return (uom_type == WEIGH); // Print Only Weighing (WEIGH)
+    if (prnstatus == '3') return (uom_type == PCS);   // Print only Non Weighing (NON WEIGH Ex: PCS)
 
-    if (prnstatus == '4') return (uom_type == WEIGH && unit_price == actual_unit_price);
-    if (prnstatus == '5') return (uom_type == PCS && unit_price == actual_unit_price);
+    if (prnstatus == '4') 				// WEIGH & Special Price
+        return (uom_type == WEIGH && fabs(unit_price - actual_unit_price) < 0.001);
+    
+    if (prnstatus == '5') 				// PCS & Special Price
+        return (uom_type == PCS && fabs(unit_price - actual_unit_price) < 0.001);
 
     return 1; // Default: print
 }
 
-//*******************************************************
+// ----- try_read -------------------------------------------------------------------------
 
 static int try_read(int prn, char *buf, int buflen) {
     int n = read(prn, buf, buflen - 1);
@@ -131,7 +148,8 @@ static int try_read(int prn, char *buf, int buflen) {
 }
 
 
-//***********************************************************
+// ------ trim_whitespace -------------------------------------------------------------------
+
 char *trim_whitespace(char *str) {
     if (!str) return NULL;
 
@@ -153,7 +171,8 @@ char *trim_whitespace(char *str) {
     return str;
 }
 
-// Helper to write everything (handles short writes)
+// ------ Helper to write everything (handles short writes) ---------------------------------------
+
 ssize_t write_all(int fd, const void *buf, size_t len) {
     size_t total = 0;
     const char *ptr = buf;
@@ -165,7 +184,8 @@ ssize_t write_all(int fd, const void *buf, size_t len) {
     return total;
 }
 
-// Read a line (up to '\n') from socket
+// ----- Read a line (up to '\n') from socket -------------------------------------------------------
+ 
 ssize_t read_line(int fd, char *buf, size_t maxlen) {
     size_t i = 0;
     while (i + 1 < maxlen) {
@@ -179,7 +199,8 @@ ssize_t read_line(int fd, char *buf, size_t maxlen) {
     return i;
 }
 
-// Create, bind, and listen on TCP socket
+// ------- Create, bind, and listen on TCP socket -----------------------------------------------------
+
 int setup_server_socket(int port) {
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) {
@@ -221,7 +242,8 @@ static void *client_thread(void *arg) {
     return NULL;
 }
 
-// Revised handle_client() that also handles printer mode
+// ------- handle_client() that also handles printer mode -------------------------------------------------------
+
 void handle_client(int client_fd) {
     char buf[BUFFER_SIZE];
     ssize_t cnt;
@@ -271,7 +293,8 @@ void handle_client(int client_fd) {
 
 
 
-// Handle exactly one command (no trailing newline), including MODE header.
+// ------- weighing_scle_commands :~ including MODE header -------------------------------------------
+
 void process_weight_line(int client_fd, const char *cmd) {
     char response[BUFFER_SIZE] = {0};
     unsigned char c;
@@ -338,42 +361,133 @@ void process_weight_line(int client_fd, const char *cmd) {
         c = 0x17; write(weight_fd, &c, 1);
         strcpy(response, "XC_LOAD_DEFAULTS sent.");
     }
-    else if (strcmp(cmd, "WR_TECHSPEC") == 0) {
-    c = 0x18; 
-    write(weight_fd, &c, 1);
-    strcpy(response, "WR_TECHSPEC sent.");
-  }
-   else if (strcmp(cmd, "WR_CUSSPEC") == 0) {
-    c = 0x1A; 
-    write(weight_fd, &c, 1);
-    strcpy(response, "WR_CUSSPEC sent.");
- }
-   else if (strcmp(cmd, "RD_CUSSPEC") == 0) {
-        unsigned char c = 0x1B;
-        write(weight_fd, &c, 1);
-        usleep(200000);
 
-        int r = read(weight_fd, response, sizeof(response) - 1);
-        if (r <= 0) {
-            strcpy(response, "Error: no data from scale");
-        } else {
-            response[r] = '\0';
+// Modify the WR_*SPEC block:
+else if (strcmp(cmd, "WR_TECHSPEC") == 0 || strcmp(cmd, "WR_CUSSPEC") == 0) {
+    unsigned char cmd_byte;
+    const char *spec_type;
+    
+    if (strcmp(cmd, "WR_TECHSPEC") == 0) {
+        cmd_byte = 0x18;  // Use correct command for tech spec
+        spec_type = "TECH";
+    } else {
+        cmd_byte = 0x1A;
+        spec_type = "CUSTOM";
+    }
+
+    // Send command byte
+    write(weight_fd, &cmd_byte, 1);
+    usleep(50000);  // Short delay
+    
+    // Read payload
+    char payload[512] = {0};
+    int total_read = 0;
+    while (total_read < sizeof(payload) - 1) {
+        int r = read(client_fd, payload + total_read, sizeof(payload) - 1 - total_read);
+        if (r <= 0) break;
+        total_read += r;
+        if (memchr(payload, '\n', total_read)) break;
+    }
+    payload[total_read] = '\0';
+
+    // Remove trailing newline
+    char *newline = strchr(payload, '\n');
+    if (newline) *newline = '\0';
+
+    // Preserve spaces and hex characters
+    char clean_payload[512] = {0};
+    char *src = payload;
+    char *dst = clean_payload;
+    while (*src) {
+        if (isxdigit(*src) || *src == ' ') {
+            *dst++ = *src;
+        }
+        src++;
+    }
+    *dst = '\0';
+
+    // printf("[DEBUG] Sending %s spec: \"%s\"\n", spec_type, clean_payload);
+    
+    // Send payload to scale
+    write(weight_fd, clean_payload, strlen(clean_payload));
+    
+    // Add terminator (CR only)
+    write(weight_fd, " ", 1);
+    
+    // Always return success
+    strcpy(response, "06");
+    
+    // Log that we're allowing time for scale processing
+   // printf("[DEBUG] %s spec sent - allowing 6 seconds for scale processing\n", spec_type);
+}
+
+	
+else if (strcmp(cmd, "RD_CUSSPEC") == 0) {
+    unsigned char c = 0x1B;
+    write(weight_fd, &c, 1);
+    usleep(200000);
+
+    // Read raw data from scale
+    char raw_response[256] = {0};
+    int r = read(weight_fd, raw_response, sizeof(raw_response) - 1);
+    if (r <= 0) {
+        strcpy(response, "Error: no data from scale");
+    } else {
+        // Clean the response - remove non-hex characters except spaces
+        char *src = raw_response;
+        char *dst = response;
+        while (*src) {
+            if (isxdigit(*src) || *src == ' ') {
+                *dst++ = *src;
+            }
+            src++;
+        }
+        *dst = '\0';
+
+        // Trim leading/trailing spaces
+        char *start = response;
+        char *end = response + strlen(response) - 1;
+        while (*start == ' ') start++;
+        while (end > start && *end == ' ') end--;
+        *(end + 1) = '\0';
+        
+        // Shift cleaned response to start if needed
+        if (start != response) {
+            memmove(response, start, strlen(start) + 1);
         }
     }
-    else if (strcmp(cmd, "RD_TECHSPEC") == 0) {
-        unsigned char c = 0x19;
-        write(weight_fd, &c, 1);
-        usleep(200000);
+}
 
-        // Read whatever ASCII the scale sends (e.g. "03 05 03 00 ...\r\n")
-        int r = read(weight_fd, response, sizeof(response) - 1);
-        if (r <= 0) {
-            strcpy(response, "Error: no data from scale");
-        } else {
-            // Just null-terminate the ASCII string exactly as received:
-            response[r] = '\0';
+else if (strcmp(cmd, "RD_TECHSPEC") == 0) {
+    unsigned char c = 0x19;
+    write(weight_fd, &c, 1);
+    usleep(200000);
+
+    // Read whatever ASCII the scale sends
+    char raw_response[256] = {0};
+    int r = read(weight_fd, raw_response, sizeof(raw_response) - 1);
+    if (r <= 0) {
+        strcpy(response, "Error: no data from scale");
+    } else {
+        // Clean the response - remove non-hex characters except spaces
+        char *src = raw_response;
+        char *dst = response;
+        while (*src) {
+            if (isxdigit(*src) || *src == ' ') {
+                *dst++ = *src;
+            }
+            src++;
         }
+        *dst = '\0';
+        
+        // Trim leading/trailing spaces
+        char *start = response;
+        char *end = response + strlen(response) - 1;
+        while (*start == ' ') start++;
+        while (end > start && *end == ' ') end--;
+        *(end + 1) = '\0';
     }
+}
 
     else if (strcmp(cmd, "XC_RESTART") == 0) {
         c = 0x1C; write(weight_fd, &c, 1);
@@ -388,7 +502,7 @@ void process_weight_line(int client_fd, const char *cmd) {
 }
 
 
-// --- Live data globals (with Data ID and Description) ---
+// ------ Live data globals (with Data ID and Description) ---------------------------------------------------
 
 // Group 1–15: PLU & Basic Info
 static int    plu_id              = 0;   // 1  – PLU No (Unique product number)
@@ -498,58 +612,56 @@ static char   barcode_flag[32]    = ""; // 95 – Barcode Flag (Encoded flag)
 static char   bill_text[128]      = ""; // 96 – Bill Text (Payment note)
 
 
-// ─── Helper Prototypes ───────────────────────────────────────
-static void LoadJSONBarcodeRecord(int bcnum,
-    char *out_data,
-    char *out_type,
-    char *out_name,
-    char *out_fld1,   char *out_cond1,   char *out_shift1,
-    char *out_fld2,   char *out_cond2,   char *out_shift2);
+// ----- LoadDBBarcodeRecord: Fetch from barcode_templates table ------------------------------------------
 
-// ─── LoadJSONBarcodeRecord ───────────────────────────────────
-static void LoadJSONBarcodeRecord(int bcnum,
-    char *out_data,
-    char *out_type,
-    char *out_name,
-    char *out_fld1,   char *out_cond1,   char *out_shift1,
-    char *out_fld2,   char *out_cond2,   char *out_shift2)
+int LoadDBBarcodeRecord(int barcode_number,
+    char *data, char *type, char *name,
+    char *fld1, char *cond1, char *shift1,
+    char *fld2, char *cond2, char *shift2)
 {
-    struct json_object *arr = NULL, *entry = NULL, *val = NULL;
-    if (!( json_root
-         && json_object_object_get_ex(json_root, "barcodes", &arr)
-         && json_object_get_type(arr)==json_type_array ))
-        return;
+    sqlite3 *db;
+    sqlite3_stmt *stmt;
 
-    int n = json_object_array_length(arr);
-    for (int i = 0; i < n; i++) {
-        entry = json_object_array_get_idx(arr, i);
-        if (!entry) continue;
-        if (json_object_object_get_ex(entry, "barcode_number", &val)
-         && json_object_get_int(val) == bcnum)
-        {
-            #define GET_STR(k,b,s) \
-              do { \
-                if (json_object_object_get_ex(entry, k, &val) \
-                 && json_object_get_type(val)==json_type_string) \
-                  strncpy(b, json_object_get_string(val), (s)-1), b[(s)-1]='\0'; \
-              } while(0)
+    if (sqlite3_open(LFT_DB_PATH, &db) != SQLITE_OK)
+        return 1;
 
-            GET_STR("barcode_data",   out_data,   64);
-            GET_STR("barcode_type",   out_type,   16);
-            GET_STR("barcode_name",   out_name,   16);
-            GET_STR("barcode_fld1",   out_fld1,   16);
-            GET_STR("fld1_condition", out_cond1,   8);
-            GET_STR("fld1_shift",     out_shift1,  4);
-            GET_STR("barcode_fld2",   out_fld2,   16);
-            GET_STR("fld2_condition", out_cond2,   8);
-            GET_STR("fld2_shift",     out_shift2,  4);
+    const char *sql =
+        "SELECT barcode_data, barcode_type, barcode_name, "
+        "barcode_fld1, fld1_condition, fld1_shift, "
+        "barcode_fld2, fld2_condition, fld2_shift "
+        "FROM barcode_templates WHERE barcode_number = ?";
 
-            #undef GET_STR
-            break;
-        }
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return 1;
     }
+
+    sqlite3_bind_int(stmt, 1, barcode_number);
+
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        snprintf(data,   128, "%s", sqlite3_column_text(stmt, 0));
+        snprintf(type,    16, "%s", sqlite3_column_text(stmt, 1));
+        snprintf(name,    16, "%s", sqlite3_column_text(stmt, 2));
+        snprintf(fld1,    16, "%s", sqlite3_column_text(stmt, 3));
+        snprintf(cond1,    8, "%s", sqlite3_column_text(stmt, 4));
+        snprintf(shift1,   4, "%s", sqlite3_column_text(stmt, 5));
+        snprintf(fld2,    16, "%s", sqlite3_column_text(stmt, 6));
+        snprintf(cond2,    8, "%s", sqlite3_column_text(stmt, 7));
+        snprintf(shift2,   4, "%s", sqlite3_column_text(stmt, 8));
+    } else {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return 2;
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return 0;
 }
 
+
+// ------ load_json_data ------------------------------------------------------------------------------
 
 void load_json_data(const char *path) {
     FILE *f = fopen(path, "r");
@@ -805,46 +917,21 @@ void load_json_data(const char *path) {
         }
         }
         
-         if (
-        strcasecmp(uom, "kg") == 0 || strcasecmp(uom, "g") == 0 ||
-        strcasecmp(guom, "kg") == 0 || strcasecmp(guom, "g") == 0
-    ) {
-        uom_type = WEIGH;
-    } else {
-        uom_type = PCS;
-    }
-        
- // 2) Handle the "barcodes" array at the original top level
-struct json_object *barcodes_obj = NULL;
-if (json_root
-    && json_object_object_get_ex(json_root, "barcodes", &barcodes_obj)
-    && json_object_get_type(barcodes_obj) == json_type_array)
-{
-        size_t bc_count = json_object_array_length(barcodes_obj);
-        for (size_t i = 0; i < bc_count; i++) {
-            struct json_object *bc = json_object_array_get_idx(barcodes_obj, i);
+	// After processing JSON fields
+	if (strcasecmp(uom, "kg") == 0 || strcasecmp(uom, "g") == 0 ||
+	    strcasecmp(guom, "kg") == 0 || strcasecmp(guom, "g") == 0) {
+	    uom_type = WEIGH;
+	} else if (strcasecmp(uom, "pcs") == 0 || strcasecmp(guom, "pcs") == 0) {
+	    uom_type = PCS;
+	} else {
+	    // Handle other units as non-weighing by default
+	    uom_type = PCS;
+	}
 
-            json_object_object_foreach(bc, bk, bv) {
-                if (strcmp(bk, "barcode_number") == 0) {
-                    int num = json_object_get_int(bv);
-                    // store num in your array
-                }
-                else if (strcmp(bk, "barcode_name") == 0) {
-                    const char *s = json_object_get_string(bv);
-                    if (s) {
-                        // strncpy into your struct
-                    }
-                }
-                // … handle the rest of your barcode fields …
-            }
-        }
-    }
-
-    // Clean up JSON and buffer exactly once
     free(data);
 }
 
-//-----------GetVariableText--------------------------------------------------------------------------------
+//----------- Get_Variable_Text --------------------------------------------------------------------------------
 
 int GetVariableText(unsigned short data_id, char *buf) {
     switch (data_id) {
@@ -1036,7 +1123,8 @@ int GetVariableText(unsigned short data_id, char *buf) {
 }
 
 
-// --- STUBS & GLOBALS ---
+// ------------ STUBS & GLOBALS ----------------------------------------------------------------------------------
+
 // Dummy RTC
 typedef struct { int dd,mm,yyyy,hr,min,sec,dow; } RTC_CFG;
 void RTC_Get(RTC_CFG *r) { r->dd=1; r->mm=1; r->yyyy=2025; r->hr=12; r->min=0; r->sec=0; r->dow=3; }
@@ -1058,7 +1146,8 @@ void GetItemInfoByIndex(int idx, char *out_plu, float *out_qty_wt, int *out_uom)
 }
 float ConvertToGrams(float w) { return w * 1000.0f; }
 
-// External placeholders
+// -------- External placeholders -------------------------------------------------------------------------------------
+
 extern char   barcode_data[64];
 extern int    plu_id, department_no, no_of_items, operator_no, group_no;
 extern char plu_code[32], guom[32], scale_no[32], scale_name[64], barcode_flag[32], bill_text[128];
@@ -1076,7 +1165,7 @@ static void parse_dt(const char *ds, const char *ts, struct tm *out) {
     }
 }
 
-//------------GetBarcode Data-------------------------------------------------------------------------------------------
+//------------ GetBarcode Data -------------------------------------------------------------------------------------------
 
 int GetBarcodeData(char *bdp, const char *bt) {
     char t[64]; size_t i = 0;
@@ -1203,7 +1292,7 @@ int GetBarcodeData(char *bdp, const char *bt) {
     return 0;
 }
 
-// -------------Position & Style Helpers----------------------------------------------------------
+// ------------- Position & Style Helpers ----------------------------------------------------------
 
 void set_absolute_position(int prn, int x_dots, int y_dots) {
     uint8_t cmd_x[4] = { ESC, '$', x_dots & 0xFF, (x_dots >> 8) & 0xFF };
@@ -1246,7 +1335,8 @@ void parse_mode(const char *mode, int *bold, int *underline, int *invert) {
 }
 
 
-// ─── send_text() ──────────────────────────────────────────────────
+// ------ send_text() -------------------------------------------------------------------
+
 void send_text(int prn,
                float x, float y,
                int font,
@@ -1374,8 +1464,7 @@ void send_text(int prn,
 }
 
 
-// ─── send_barcode() ──────────────────────────────────────────────────
-
+// -------- send_barcode() ----------------------------------------------------------------
 
 void send_barcode(int prn,
                   float x, float y,
@@ -1543,7 +1632,7 @@ void send_barcode(int prn,
 
 
 
-// ─── send_rectangel() ──────────────────────────────────────────────────
+// ------- send_rectangel() -----------------------------------------------------------------------
 
 void send_rectangle(int prn, float x_mm, float y_mm,
                     float w_mm, float h_mm,
@@ -1615,7 +1704,7 @@ void send_rectangle(int prn, float x_mm, float y_mm,
     write_all(prn, cmd, sizeof(cmd));
 }
 
-//***********************************************************************************************
+// ------ send_read_response ----------------------------------------------------------------------
 
 bool send_read_response(int prn, const char *expected, int timeout_ms) {
     char buf[256];
@@ -1645,7 +1734,8 @@ bool send_read_response(int prn, const char *expected, int timeout_ms) {
 }
 
 
-// *********************************************************************
+// ----- send_bitmap_data ------------------------------------------------------------------------
+
 void send_bitmap_data(int prn,
                       float x_mm, float y_mm,
                       int angle,
@@ -1797,7 +1887,7 @@ void send_bitmap_data(int prn,
 
 
 
-//--------------Decode backslash-escaped binary image string----------------------------------------
+//-------------- Decode backslash-escaped binary image string ----------------------------------------
 
 void decode_escaped_binary(FILE *f, FILE *out, int expected_bytes) {
     int ch, count = 0;
@@ -1819,7 +1909,7 @@ void decode_escaped_binary(FILE *f, FILE *out, int expected_bytes) {
 }
 
 
-// -------------Send Circle --------------------------------------------------------------------------------------
+// ------------- Send_Circle --------------------------------------------------------------------------------------
 
 void send_circle(int prn, float x, float y, float radius, float thickness, char mode, char printstatus)
 {
@@ -1860,7 +1950,7 @@ void send_circle(int prn, float x, float y, float radius, float thickness, char 
     write_all(prn, cmd, i);
 }
 
-
+// --------------------------------------------------------------------------------------------------
 
 uint8_t *job_buf = NULL;
 size_t job_len = 0, job_cap = 0;
@@ -1884,13 +1974,19 @@ void buffer_data(const void *data, size_t len) {
 // --------- int main ----------------------------------------------------------------------
 
 int main(int argc, char **argv) {
+
+if (argc > 1 && strcmp(argv[1], "--version") == 0) {
+        printf("Essae WSLPR Driver Version: %s\n", DRIVER_VERSION);
+        return 0;
+    }
+
     if (argc == 3) {
         // CLI mode
         return convert_label(argv[1], argv[2]);
     }
     else if (argc == 1) {
 	// 1. Open & configure the scale serial port (OPTIONAL)
-	weight_fd = open("/dev/ttyUSB1", O_RDWR | O_NOCTTY | O_SYNC);
+	weight_fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_SYNC);
 	if (weight_fd < 0) {
 	    perror("Warning: scale not connected (/dev/ttyUSB1)");
 	    weight_fd = -1;  // mark as unavailable
@@ -1919,7 +2015,7 @@ int main(int argc, char **argv) {
 	}
        // 2. Start TCP server on port 8888
         int server_fd = setup_server_socket(PORT);
-        printf("Listening on port %d...\n", PORT);
+        printf("Listening on TCP port %d...\n", PORT);
 
         // 3. Accept loop—always listening, never closing the port
         while (1) {
@@ -1953,7 +2049,6 @@ int main(int argc, char **argv) {
             pthread_detach(tid);
         }
 
-        // unreachable
     }
     else {
         fprintf(stderr, "Usage:\n");
@@ -1967,14 +2062,14 @@ int main(int argc, char **argv) {
 //-------- convert label ----------------------------------------------------------------------------------
 
 int convert_label(const char *config_path, const char *lft_path) {
-    // 1) load JSON into the global json_root
+    // ─── Step 1: Load JSON file for basic fields (not barcode) ──────
     load_json_data(config_path);
     if (json_root == NULL) {
         fprintf(stderr, "Error: failed to parse JSON in %s\n", config_path);
         return 1;
     }
 
-    // --- 1.a) Extract actual_unit_price and unit_price from JSON ---
+    // ─── Step 1.a: Extract actual_unit_price and spl_up from JSON ───
     {
         struct json_object *d = NULL, *val = NULL;
 
@@ -1988,105 +2083,82 @@ int convert_label(const char *config_path, const char *lft_path) {
         }
     }
 
+    // ─── Step 2: Override weight/quantity from scale if needed ──────
+    if (uom_type == WEIGH) {
+        char rawbuf[64] = {0};
+        double kg = 0.0;
 
-    // ─── Count how many barcodes we have ──────────────────────────
-    {
-        json_object *barcodes_arr = NULL;
-        if (json_object_object_get_ex(
-                json_root,        // <-- use json_root, not job_obj
-                "barcodes",
-                &barcodes_arr
-            )
-            && json_object_is_type(barcodes_arr, json_type_array))
-        {
-            num_json_barcodes = json_object_array_length(barcodes_arr);
+        // Send RD_WEIGHT (0x05) to scale
+        unsigned char rd_cmd = 0x05;
+        if (write(weight_fd, &rd_cmd, 1) < 0) {
+            perror("Error writing RD_WEIGHT to scale port");
         } else {
-            num_json_barcodes = 0;
+            usleep(200000);  // wait for response
+
+            int n = read(weight_fd, rawbuf, sizeof(rawbuf) - 1);
+            if (n > 0) {
+                rawbuf[n] = '\0';
+                kg = atof(rawbuf);
+            } else {
+                fprintf(stderr, "Warning: scale RD_WEIGHT returned no data.\n");
+                kg = 0.0;
+            }
         }
-    }
-    // ───────────────────────────────────────────────────────────────
 
-// ================================================================
-// Only override JSON weight_or_quantity if item is a WEIGHING item
-// ================================================================
-if (uom_type == WEIGH) {
-    char rawbuf[64] = {0};
-    double kg = 0.0;
-
-    // Send RD_WEIGHT (0x05) to the scale
-    unsigned char rd_cmd = 0x05;
-    if (write(weight_fd, &rd_cmd, 1) < 0) {
-        perror("Error writing RD_WEIGHT to scale port");
-    } else {
-        usleep(200000);  // wait for scale response
-
-        int n = read(weight_fd, rawbuf, sizeof(rawbuf) - 1);
-        if (n > 0) {
-            rawbuf[n] = '\0';
-            kg = atof(rawbuf);
-        } else {
-            fprintf(stderr, "Warning: scale RD_WEIGHT returned no data.\n");
-            kg = 0.0;
-        }
+        current_gross_weight = kg;     // Data ID 71
+        weight_or_quantity   = kg;     // Data ID 72
     }
 
-    // Override only for weighing items
-    current_gross_weight = kg;     // Data ID 71
-    weight_or_quantity   = kg;     // Data ID 72
-}
+    // ─── Step 3: Load LFT content from SQLite slot ──────────────────
+    int slot = atoi(lft_path);  // Note: lft_path is actually slot number string
 
-    // ================================================================
+    sqlite3 *db;
+    sqlite3_stmt *stmt;
+    int rc = sqlite3_open(LFT_DB_PATH, &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error: cannot open LFT database: %s\n", sqlite3_errmsg(db));
+        return 2;
+    }
 
-// ─── STEP: Read slot from param and fetch LFT from SQLite DB ──────
-int slot = atoi(lft_path);  // lft_path is actually a slot string
+    const char *sql = "SELECT content FROM lft_files WHERE slot = ?";
+    sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    sqlite3_bind_int(stmt, 1, slot);
 
-sqlite3 *db;
-sqlite3_stmt *stmt;
-int rc = sqlite3_open(LFT_DB_PATH, &db);
-if (rc != SQLITE_OK) {
-    fprintf(stderr, "Error: cannot open LFT database: %s\n", sqlite3_errmsg(db));
-    return 2;
-}
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        fprintf(stderr, "Error: no LFT file found for slot %d\n", slot);
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return 2;
+    }
 
-const char *sql = "SELECT content FROM lft_files WHERE slot = ?";
-sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
-sqlite3_bind_int(stmt, 1, slot);
+    const void *blob = sqlite3_column_blob(stmt, 0);
+    int blob_size = sqlite3_column_bytes(stmt, 0);
 
-rc = sqlite3_step(stmt);
-if (rc != SQLITE_ROW) {
-    fprintf(stderr, "Error: no LFT file found for slot %d\n", slot);
+    // Write blob to temp file
+    const char *temp_lft_path = "/var/tmp/server_selected.lft";
+    FILE *f = fopen(temp_lft_path, "w+b");
+    if (!f) {
+        perror("Error opening temp LFT file");
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return 2;
+    }
+    fwrite(blob, 1, blob_size, f);
+    fclose(f);
+
     sqlite3_finalize(stmt);
     sqlite3_close(db);
-    return 2;
-}
 
-const void *blob = sqlite3_column_blob(stmt, 0);
-int blob_size = sqlite3_column_bytes(stmt, 0);
-
-// Write blob to temp file
-const char *temp_lft_path = "/tmp/server_selected.lft";
-FILE *f = fopen(temp_lft_path, "wb");
-if (!f) {
-    perror("Error opening temp LFT file");
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
-    return 2;
-}
-fwrite(blob, 1, blob_size, f);
-fclose(f);
-
-sqlite3_finalize(stmt);
-sqlite3_close(db);
-
-// Reopen file for reading label commands
-f = fopen(temp_lft_path, "r");
-if (!f) {
-    perror("Error reopening temp LFT file");
-    return 2;
-}
+    // ─── Step 4: Reopen LFT file for parsing and printing ───────────
+    f = fopen(temp_lft_path, "r");
+    if (!f) {
+        perror("Error reopening temp LFT file");
+        return 2;
+    }
 
     
-    const char *portname = "/dev/ttyUSB0";
+    const char *portname = "/dev/ttyUSB1";
     int fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
         perror("opening serial port");
@@ -2287,49 +2359,41 @@ else if (strncmp(line, "~T", 2) == 0) {
 
 else if (strncmp(line, "~V", 2) == 0) {
     float x, y, xm, ym, spacing;
-    int angle, font, len, offset, lines;
+    int angle, font, len, offset, lines, text_start = 0;
     char justify, mode_str[4] = "", prnstatus = '1';
     char id[32] = "", raw[512] = "", decoded[512] = "", actual[512] = "";
-    char *p = line + 3;
+    char *p = line + 3, *c;
 
-    // Strip print status (last char if digit)
-    char *last_comma = strrchr(p, ',');
-    if (last_comma && strlen(last_comma + 1) == 1 && isdigit((unsigned char)*(last_comma + 1))) {
-        prnstatus = *(last_comma + 1);
-        *last_comma = '\0';
+    // Trim trailing newline/space
+    for (int i = strlen(p) - 1; i >= 0 && isspace((unsigned char)p[i]); --i)
+        p[i] = '\0';
+
+    // Check for print status at end
+    c = strrchr(p, ',');
+    if (c && strlen(c + 1) == 1 && isdigit((unsigned char)*(c + 1))) {
+        prnstatus = *(c + 1);
+        *c = '\0';
     }
 
-    // Split fields
-    char *fields[14];
-    int i = 0;
-    char *token = strtok(p, ",");
-    while (token && i < 14) {
-        fields[i++] = token;
-        token = strtok(NULL, ",");
-    }
-    if (i < 13) continue;
+    // Parse fixed parameters
+    c = strrchr(p, ','); mode_str[0] = *(c + 1); *c = 0;
+    c = strrchr(p, ','); spacing = atof(c + 1); *c = 0;
+    c = strrchr(p, ','); lines = atoi(c + 1); *c = 0;
+    c = strrchr(p, ','); justify = *(c + 1); *c = 0;
+    c = strrchr(p, ','); offset = atoi(c + 1); *c = 0;
+    c = strrchr(p, ','); len = atoi(c + 1); *c = 0;
 
-    // Parse fields
-    x = atof(fields[0]);
-    y = atof(fields[1]);
-    angle = atoi(fields[2]);
-    font = atoi(fields[3]);
-    xm = atof(fields[4]);
-    ym = atof(fields[5]);
-    strncpy(id, fields[6], sizeof(id)-1);
-    id[sizeof(id)-1] = '\0';
-    strncpy(raw, fields[7], sizeof(raw)-1);
+    // Parse main params and extract ID + raw
+    if (sscanf(p, "%f,%f,%d,%d,%f,%f,%31[^,],%n", &x, &y, &angle, &font, &xm, &ym, id, &text_start) < 7) {
+        continue;  // invalid line
+    }
+
+    strncpy(raw, p + text_start, sizeof(raw) - 1);
     raw[sizeof(raw)-1] = '\0';
-    len = atoi(fields[8]);
-    offset = atoi(fields[9]);
-    justify = fields[10][0];
-    lines = atoi(fields[11]);
-    spacing = atof(fields[12]);
-    strncpy(mode_str, fields[13], 3); mode_str[3] = '\0';
 
     if (!CheckPrintStatus(prnstatus)) continue;
 
-    // Escape decoding (e.g. \n, \, etc.)
+    // Decode escape sequences
     char *s = raw, *d = decoded;
     while (*s) {
         if (*s == '\\') {
@@ -2343,29 +2407,29 @@ else if (strncmp(line, "~V", 2) == 0) {
     }
     *d = '\0';
 
-    // ✅ Actual value fetch
+    // Get actual variable
     actual[0] = '\0';
     if (isdigit((unsigned char)id[0]) && GetVariableText(atoi(id), actual) == 0) {
-        // success
+        // OK
     } else if (json_root) {
         struct json_object *datao, *valo;
         if (json_object_object_get_ex(json_root, "data", &datao) &&
             json_object_object_get_ex(datao, id, &valo)) {
             snprintf(actual, sizeof(actual), "%s", json_object_get_string(valo));
         } else {
-            strcpy(actual, decoded); // fallback
+            strcpy(actual, decoded);  // fallback
         }
     } else {
-        strcpy(actual, decoded); // fallback
+        strcpy(actual, decoded);  // fallback
     }
 
-    // Finally send
     send_text(fd, x, y, font, xm, ym, actual, len, offset, justify, lines, spacing, angle, mode_str);
 }
 
 
 
 // ------ Barcode ~B handler (JSON-driven) ------------------------------------------------------------------
+
 
 else if (strncmp(line, "~B", 2) == 0) {
     float x, y, module_width_mm, bar_height_mm;
@@ -2387,7 +2451,9 @@ else if (strncmp(line, "~B", 2) == 0) {
 
     // Get barcode from JSON using selected barcode number
     int data_id = gui_data_id;
-    if (data_id < 1 || data_id > num_json_barcodes) {
+
+    // ✅ FIXED range check (was: if (data_id < 1 || data_id > num_json_barcodes))
+    if (data_id < 1 || data_id > 99) {
         fprintf(stderr, "Invalid barcode number: %d\n", data_id);
         continue;
     }
@@ -2396,11 +2462,14 @@ else if (strncmp(line, "~B", 2) == 0) {
     char fld1[16] = {0}, cond1[8] = {0}, shift1[4] = {0};
     char fld2[16] = {0}, cond2[8] = {0}, shift2[4] = {0};
 
-    LoadJSONBarcodeRecord(data_id,
+    if (LoadDBBarcodeRecord(data_id,
         bdata, btype, bname,
         fld1, cond1, shift1,
-        fld2, cond2, shift2
-    );
+        fld2, cond2, shift2) != 0)
+    {
+        fprintf(stderr, "Failed to load barcode #%d from DB\n", data_id);
+        continue;
+    }
 
     // Build actual barcode data
     strncpy(barcode_data, bdata, sizeof(barcode_data)-1);
@@ -2623,6 +2692,8 @@ else if (strncmp(line, "~e", 2) == 0) {
                 write_all(fd, (uint8_t[]){ GS,0x0C },2);  // GS FF
             write_all(fd, (uint8_t[]){ ESC,'S' },2);       // ESC S
         }
+        
+// -------------------------------------------------------------------------------------------------
 
    }
 
@@ -2637,4 +2708,3 @@ else if (strncmp(line, "~e", 2) == 0) {
 }
 
 // ------------- End Of The Driver Code -----------------------------------------------------------------
-

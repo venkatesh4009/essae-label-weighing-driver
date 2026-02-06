@@ -1,0 +1,15 @@
+[Unit]
+Description=Essae Label Driver Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/Essae_WSLPR_server_v2.0
+Restart=always
+User=root
+WorkingDirectory=/usr/local/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

@@ -6,16 +6,28 @@ import socket
 import threading
 import time
 import sqlite3
+import json
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton,
     QVBoxLayout, QFormLayout, QLabel, QFileDialog, QTextEdit,
     QAction, QStatusBar, QLineEdit, QHBoxLayout,
     QTabWidget, QGridLayout, QSplitter, QMessageBox,
-    QComboBox, QInputDialog, QDialog, QDialogButtonBox
+    QComboBox, QInputDialog, QDialog, QDialogButtonBox,
+    QListWidget, QListWidgetItem
 )
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont, QColor
 from PyQt5.QtCore import Qt, pyqtSignal
+
+# --- Version reader ---
+def get_driver_version():
+    import subprocess
+    try:
+        output = subprocess.check_output(['/usr/local/bin/Essae_WSLPR_server_v2.0', '--version'])
+        return output.decode().strip()
+    except Exception as e:
+        return f"Error: {e}"
+
 
 # Constants
 PORT = 8888
@@ -23,7 +35,8 @@ DEFAULT_HOST = '0.0.0.0'
 POLL_INTERVAL = 1.0       # seconds between raw polls normally
 CAL_POLL_INTERVAL = 0.2   # seconds between calibration raw polls
 RECV_TIMEOUT = 2.0        # socket recv timeout
-DB_PATH = 'SQL_LFT_Files.db'
+#DB_PATH = 'SQL_LFT_Files.db'
+DB_PATH = "/usr/local/bin/SQL_LFT_Files.db"
 MAX_SLOTS = 99
 
 class LFTEditorDialog(QDialog):
@@ -46,6 +59,37 @@ class LFTEditorDialog(QDialog):
         self.save_callback(new_content)
         self.accept()
 
+class BarcodeEditorDialog(QDialog):
+    def __init__(self, data=None, save_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Barcode Editor")
+        self.resize(500, 400)
+        self.save_callback = save_callback
+        layout = QFormLayout(self)
+        self.fields = {}
+        labels = [
+            "barcode_number", "barcode_name", "barcode_type", "barcode_data",
+            "barcode_fld1", "fld1_condition", "fld1_shift",
+            "barcode_fld2", "fld2_condition", "fld2_shift"
+        ]
+        for key in labels:
+            entry = QLineEdit()
+            layout.addRow(key + ":", entry)
+            self.fields[key] = entry
+        if data:
+            for key in data:
+                if key in self.fields:
+                    self.fields[key].setText(str(data[key]))
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        result = {k: self.fields[k].text().strip() for k in self.fields}
+        self.save_callback(result)
+        self.accept()
+
 class LabelAndScaleGUI(QMainWindow):
     scale_response = pyqtSignal(str, str)
     raw_data       = pyqtSignal(str)
@@ -55,6 +99,7 @@ class LabelAndScaleGUI(QMainWindow):
         self.setWindowTitle("📋 Label Printer & ⚖️ Weighing Scale")
         self.resize(950, 550)
         self.setMinimumSize(800, 450)
+        self.version_label = QLabel("Driver Version: unknown")
 
         # Networking state
         self.server_host = DEFAULT_HOST
@@ -85,6 +130,20 @@ class LabelAndScaleGUI(QMainWindow):
             )
         """
         )
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS barcode_templates (
+        barcode_number INTEGER PRIMARY KEY,
+        barcode_name TEXT,
+        barcode_type TEXT,
+        barcode_data TEXT,
+        barcode_fld1 TEXT,
+        fld1_condition TEXT,
+        fld1_shift TEXT,
+        barcode_fld2 TEXT,
+        fld2_condition TEXT,
+        fld2_shift TEXT
+        )
+    """)
         self.conn.commit()
 
     def _create_menu(self):
@@ -99,6 +158,58 @@ class LabelAndScaleGUI(QMainWindow):
         about = QAction("&About", self)
         about.triggered.connect(lambda: self.statusBar().showMessage("Label+Scale GUI v2.0"))
         hm.addAction(about)
+
+    def _on_scale_response(self, cmd, response):
+       print(f"Scale response: {cmd} → {response}")
+
+    def _on_raw_data(self, data):
+       print(f"Raw scale data: {data}")
+    
+    def print_label(self):
+        if not self.connected:
+            self.log.append("⚠️ Error: Not connected.")
+            return
+
+        if not hasattr(self, 'json_path'):
+            self.log.append("⚠️ Error: Select JSON file first.")
+            return
+
+        slot = self.slot_select.currentData()
+        if not slot:
+            self.log.append("⚠️ Error: Select an LFT slot first.")
+            return
+
+        try:
+            # Check if LFT slot exists
+            c = self.conn.cursor()
+            c.execute('SELECT content FROM lft_files WHERE slot=?', (slot,))
+            row = c.fetchone()
+            if not row:
+                self.log.append("⚠️ Error: Selected LFT slot is empty.")
+                return
+
+            # Barcode number from dropdown
+            barcode_number = self.barcode_select.currentData()
+            if barcode_number is None:
+                self.log.append("⚠️ Error: Select a barcode number.")
+                return
+
+            # ✅ Now send JSON path, slot, and barcode number to server
+            packet = (
+                f"MODE:PRINTER\n"
+                f"{self.json_path}\n"
+                f"{slot}\n"
+                f"{barcode_number}\n"
+            ).encode()
+
+            # Send to TCP server
+            with socket.create_connection((self.server_host, PORT), timeout=5) as s:
+                s.sendall(packet)
+                resp = s.recv(1024).decode().strip()
+                self.log.append(f"🖨️ Printer → {resp}")
+        except Exception as e:
+            self.log.append(f"❌ Print error: {e}")
+
 
     def _create_main_layout(self):
         container = QWidget(self)
@@ -120,6 +231,8 @@ class LabelAndScaleGUI(QMainWindow):
         left_layout.addLayout(conn_row)
         # Title
         title = QLabel("Label Printer")
+        self.version_label.setAlignment(Qt.AlignCenter)
+        left_layout.addWidget(self.version_label)
         title.setFont(QFont("Roboto", 18, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(title)
@@ -143,6 +256,33 @@ class LabelAndScaleGUI(QMainWindow):
         btn_row = QHBoxLayout()
         for b in (btn_add, btn_edit, btn_del): btn_row.addWidget(b)
         form.addRow(btn_row)
+        
+        # ─── Barcode Template Section ───
+        # Barcode list widget
+        self.barcode_list = QListWidget()
+        self.barcode_list.setFixedHeight(150)
+        self._refresh_barcodes()
+        form.addRow("Barcodes:", self.barcode_list)
+        
+        # Barcode management buttons
+        barcode_btn_row = QHBoxLayout()
+        self.btn_add_barcode = QPushButton("Add Barcode")
+        self.btn_add_barcode.clicked.connect(self._add_barcode)
+        self.btn_edit_barcode = QPushButton("Edit Selected")
+        self.btn_edit_barcode.clicked.connect(self._edit_barcode)
+        self.btn_edit_barcode.setEnabled(False)
+        self.btn_del_barcode = QPushButton("Delete Selected")
+        self.btn_del_barcode.clicked.connect(self._delete_barcode)
+        self.btn_del_barcode.setEnabled(False)
+        
+        barcode_btn_row.addWidget(self.btn_add_barcode)
+        barcode_btn_row.addWidget(self.btn_edit_barcode)
+        barcode_btn_row.addWidget(self.btn_del_barcode)
+        form.addRow(barcode_btn_row)
+        
+        # Connect selection change signal
+        self.barcode_list.itemSelectionChanged.connect(self._on_barcode_selection_changed)
+        
         # JSON browse
         btn_json = QPushButton("Browse JSON")
         btn_json.clicked.connect(self.select_json)
@@ -221,6 +361,11 @@ class LabelAndScaleGUI(QMainWindow):
         rl.addWidget(self.tabs)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 3)
+        
+    def _on_barcode_selection_changed(self):
+        selected = self.barcode_list.currentItem()
+        self.btn_edit_barcode.setEnabled(selected is not None)
+        self.btn_del_barcode.setEnabled(selected is not None)
 
     # LFT slot methods
     def _refresh_slots(self):
@@ -230,6 +375,16 @@ class LabelAndScaleGUI(QMainWindow):
         self.slot_select.clear()
         for slot, name in items:
             self.slot_select.addItem(f"{slot}: {name}", slot)
+            
+    def _refresh_barcodes(self):
+        self.barcode_list.clear()
+        c = self.conn.cursor()
+        c.execute("SELECT barcode_number, barcode_name FROM barcode_templates ORDER BY barcode_number")
+        barcodes = c.fetchall()
+        for num, name in barcodes:
+            item = QListWidgetItem(f"{num}: {name}")
+            item.setData(Qt.UserRole, num)
+            self.barcode_list.addItem(item)
 
     def _add_lft(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select LFT to Add", "", "LFT Files (*.LFT *.lft)")
@@ -271,6 +426,81 @@ class LabelAndScaleGUI(QMainWindow):
         c.execute('UPDATE lft_files SET content=? WHERE slot=?', (new_blob, slot))
         self.conn.commit()
         QMessageBox.information(self, "Edit LFT", "Changes saved to slot.")
+        self._refresh_slots()
+
+    def _add_barcode(self):
+        def save(data):
+            try:
+                c = self.conn.cursor()
+                c.execute("""
+                    INSERT INTO barcode_templates (
+                        barcode_number, barcode_name, barcode_type, barcode_data,
+                        barcode_fld1, fld1_condition, fld1_shift,
+                        barcode_fld2, fld2_condition, fld2_shift
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    int(data["barcode_number"]), data["barcode_name"], data["barcode_type"], data["barcode_data"],
+                    data["barcode_fld1"], data["fld1_condition"], data["fld1_shift"],
+                    data["barcode_fld2"], data["fld2_condition"], data["fld2_shift"]
+                ))
+                self.conn.commit()
+                QMessageBox.information(self, "Barcode", "Added successfully.")
+                self._refresh_barcodes()
+            except Exception as e:
+                QMessageBox.warning(self, "Barcode", f"Failed: {e}")
+
+        dlg = BarcodeEditorDialog(save_callback=save, parent=self)
+        dlg.exec_()
+
+    def _edit_barcode(self):
+        selected_item = self.barcode_list.currentItem()
+        if not selected_item:
+            return
+            
+        num = selected_item.data(Qt.UserRole)
+        c = self.conn.cursor()
+        c.execute("SELECT * FROM barcode_templates WHERE barcode_number=?", (num,))
+        row = c.fetchone()
+        if not row:
+            QMessageBox.warning(self, "Edit Barcode", "Not found.")
+            return
+
+        keys = [d[0] for d in c.description]
+        data = dict(zip(keys, row))
+
+        def save(new_data):
+            c.execute("""
+                UPDATE barcode_templates SET
+                    barcode_name=?, barcode_type=?, barcode_data=?,
+                    barcode_fld1=?, fld1_condition=?, fld1_shift=?,
+                    barcode_fld2=?, fld2_condition=?, fld2_shift=?
+                WHERE barcode_number=?
+            """, (
+                new_data["barcode_name"], new_data["barcode_type"], new_data["barcode_data"],
+                new_data["barcode_fld1"], new_data["fld1_condition"], new_data["fld1_shift"],
+                new_data["barcode_fld2"], new_data["fld2_condition"], new_data["fld2_shift"],
+                num
+            ))
+            self.conn.commit()
+            QMessageBox.information(self, "Barcode", "Updated.")
+            self._refresh_barcodes()
+
+        dlg = BarcodeEditorDialog(data, save_callback=save, parent=self)
+        dlg.exec_()
+
+    def _delete_barcode(self):
+        selected_item = self.barcode_list.currentItem()
+        if not selected_item:
+            return
+            
+        num = selected_item.data(Qt.UserRole)
+        resp = QMessageBox.question(self, "Delete Barcode", f"Delete barcode #{num}?")
+        if resp == QMessageBox.Yes:
+            c = self.conn.cursor()
+            c.execute("DELETE FROM barcode_templates WHERE barcode_number=?", (num,))
+            self.conn.commit()
+            self._refresh_barcodes()
+            QMessageBox.information(self, "Barcode", f"Deleted barcode #{num}")
 
     def _delete_lft(self):
         slot = self.slot_select.currentData()
@@ -444,6 +674,8 @@ class LabelAndScaleGUI(QMainWindow):
                 self.print_btn.setEnabled(True)
                 self.statusBar().showMessage(f"Connected to {host}:{PORT}")
                 self.log.append(f"✅ Connected to {host}:{PORT}")
+                version = get_driver_version()
+                self.version_label.setText(f"Driver Version: {version}")
             except Exception as e:
                 self.log.append(f"❌ Connect failed: {e}")
         else:
@@ -460,52 +692,6 @@ class LabelAndScaleGUI(QMainWindow):
             self.json_path = path
             self.json_label.setText(os.path.basename(path))
             self.log.append("📄 JSON selected")
-
-    def print_label(self):
-        if not self.connected:
-            self.log.append("⚠️ Error: Not connected.")
-            return
-        if not hasattr(self, 'json_path'):
-            self.log.append("⚠️ Error: Select JSON file first.")
-            return
-            
-        slot = self.slot_select.currentData()
-        if not slot:
-            self.log.append("⚠️ Error: Select an LFT slot first.")
-            return
-            
-        try:
-            # Retrieve LFT content from database
-            c = self.conn.cursor()
-            c.execute('SELECT content FROM lft_files WHERE slot=?', (slot,))
-            row = c.fetchone()
-            if not row:
-                self.log.append("⚠️ Error: Selected slot is empty.")
-                return
-                
-            # Write to temp file
-            #with open(TEMP_LFT_PATH, 'wb') as f:
-            #    f.write(row[0])
-                
-            # Get selected barcode number
-            sel = self.barcode_select.currentData()
-            
-            # Send slot number instead of file path
-            packet = (
-              f"MODE:PRINTER\n"
-              f"{self.json_path}\n"
-              f"{slot}\n"
-              f"{sel}\n"
-            ).encode()
-
-            # Send to server
-            with socket.create_connection((self.server_host, PORT), timeout=5) as s:
-                s.sendall(packet)
-                resp = s.recv(1024).decode().strip()
-                self.log.append(f"🖨️ Printer → {resp}")
-                
-        except Exception as e:
-            self.log.append(f"❌ Print error: {e}")
 
     def _threaded_scale_cmd(self, cmd, start_poll=False, stop_poll=False):
         self._set_scale_buttons_enabled(False)
@@ -587,6 +773,23 @@ class LabelAndScaleGUI(QMainWindow):
             QTextEdit { background-color:#FFF; color:#003D4C;
                         border:1px solid #A0A0A0; border-radius:4px; }
             QLineEdit { border:1px solid #A0A0A0; border-radius:4px; padding:4px; }
+            QListWidget { 
+                background-color: #b6dedd;
+                border: 1px solid #A0A0A0;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
+            QListWidget::item {
+                padding: 4px;
+                margin: 2px;
+                border-radius: 3px;
+            }
+            QListWidget::item:selected {
+                background-color: #00CED1;
+                color: #002B36;
+                font-weight: bold;
+            }
         """)
 
 if __name__ == "__main__":
